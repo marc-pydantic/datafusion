@@ -1493,7 +1493,7 @@ mod tests {
     use std::iter::repeat_with;
 
     use arrow::{
-        array::{Int64Array, ListArray},
+        array::{BooleanArray, Int64Array, ListArray, StringArray, StringViewArray},
         compute::SortOptions,
         datatypes::Schema,
     };
@@ -1903,6 +1903,52 @@ mod tests {
         let size1 = size_after_batch(&[Arc::new(batch1)])?;
         let size2 = size_after_batch(&[Arc::new(batch2)])?;
         assert_eq!(size1, size2);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_first_value_merge_with_corrupted_flags() -> Result<()> {
+        // Test that first_value correctly errors when boolean flags get corrupted
+        // during distributed execution, rather than silently corrupting data
+
+        // Test with Utf8 (string type that was affected by the bug)
+        let mut accumulator =
+            TrivialFirstValueAccumulator::try_new(&DataType::Utf8, false)?;
+
+        // Create states that simulate what would happen in distributed aggregation
+        // where flags become corrupted (all null) but values are still valid
+
+        // State 1: A valid string value
+        let value1 = Arc::new(StringArray::from(vec![Some("first_string")])) as ArrayRef;
+        // State 2: Corrupted boolean flag (null instead of true/false)
+        let corrupted_flag = Arc::new(BooleanArray::from(vec![None])) as ArrayRef;
+
+        let states = vec![value1, corrupted_flag];
+
+        // This should fail with a clear error message about corrupted flags
+        let result = accumulator.merge_batch(&states);
+        assert!(result.is_err());
+        let error_msg = result.unwrap_err().to_string();
+        assert!(error_msg.contains("is_set flags contain nulls"));
+
+        // Test that valid flags still work correctly
+        let mut accumulator_valid =
+            TrivialFirstValueAccumulator::try_new(&DataType::Utf8, false)?;
+
+        let value_valid =
+            Arc::new(StringArray::from(vec![Some("valid_string")])) as ArrayRef;
+        let valid_flag = Arc::new(BooleanArray::from(vec![Some(true)])) as ArrayRef;
+
+        let states_valid = vec![value_valid, valid_flag];
+
+        accumulator_valid.merge_batch(&states_valid)?;
+
+        let result_valid = accumulator_valid.evaluate()?;
+        assert_eq!(
+            result_valid,
+            ScalarValue::Utf8(Some("valid_string".to_string()))
+        );
 
         Ok(())
     }
